@@ -1,0 +1,55 @@
+#!/bin/bash
+
+h264Dir=h264
+h265Dir=h265
+targetExtension=mp4
+
+# Функция для обработки файлов
+process_file() {
+    local sourceFile="$1"
+    local relativePath="$2"
+
+    if [[ $sourceFile == *.mp4 ]] || [[ $sourceFile == *.mov ]]; then
+        targetFile="${sourceFile%.*}.${targetExtension}"
+        echo "Convert \"${relativePath}/${sourceFile}\" to \"${relativePath}/${targetFile}\""
+
+        # Создаем целевые директории, если их нет
+        mkdir -p "${h265Dir}/${relativePath}"
+        mkdir -p "${h264Dir}/${relativePath}"
+
+        # Конвертируем видео в H.265, сохраняя все аудиодорожки и субтитры
+        ffmpeg -i "$relativePath/$sourceFile" \
+          -map 0 \
+          -c:v libx265 -vtag hvc1 -preset fast \
+          -c:a copy \
+          -c:s copy \
+          -hide_banner \
+          "${h265Dir}/${relativePath}/${targetFile}"
+
+        # Перемещаем исходный файл в h264 директорию
+        mv "$relativePath/$sourceFile" "${h264Dir}/${relativePath}/${sourceFile}"
+    fi
+}
+
+find . -type d | while read -r dir; do
+    # Пропускаем все директории h264 и h265 (включая поддиректории)
+    if [[ $dir =~ ./$h264Dir(/|$) ]] || [[ $dir =~ ./$h265Dir(/|$) ]]; then
+        continue
+    fi
+
+    # Получаем относительный путь (удаляем начальные ./)
+    relativePath="${dir#./}"
+
+    # Для корневой директории оставляем пустую строку
+    if [[ "$relativePath" == "." ]]; then
+        relativePath=""
+    fi
+
+    # Обрабатываем файлы в текущей директории
+    for file in "$dir"/*; do
+        if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            process_file "$filename" "$relativePath"
+        fi
+    done
+done
