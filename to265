@@ -4,24 +4,121 @@ h264Dir=h264
 h265Dir=h265
 targetExtension=mp4
 
-mkdir -p h264
-mkdir -p h265
+# Функция для проверки, является ли видео поток H.265
+is_h265_encoded() {
+    local file="$1"
+    ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$file" | grep -q "hevc"
+    return $?
+}
 
-for sourceFile in *.*
-do
-        if [[ $sourceFile == *.mp4 ]] || [[ $sourceFile == *.mov ]]; then
-                targetFile="${sourceFile%.*}.${targetExtension}"
-                echo "Convert \"${sourceFile}\" to \"${targetFile}\""
+#!/bin/bash
 
-                # Конвертируем видео в H.265, сохраняя все аудиодорожки и субтитры
-                ffmpeg -i "$sourceFile" \
-                  -map 0 \
-                  -c:v libx265 -vtag hvc1 -preset fast \
-                  -c:a copy \
-                  -c:s copy \
-                  -hide_banner \
-                  "$h265Dir/$targetFile"
+h264Dir=h264
+h265Dir=h265
+targetExtension=mp4
 
-                mv "$sourceFile" "${h264Dir}/${sourceFile}"
+# Функция для проверки, является ли видео поток H.265
+is_h265_encoded() {
+    local file="$1"
+    ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$file" | grep -q "hevc"
+    return $?
+}
+
+# Функция для обработки ошибок
+handle_error() {
+    local sourceFile="$1"
+    local relativePath="$2"
+    local targetFile="$3"
+
+    echo "Error processing file: ${sourceFile}"
+
+    # Если существует оригинальный файл в h264Dir, возвращаем его на место
+    if [ -f "${h264Dir}/${relativePath}/${sourceFile}" ]; then
+        echo "Restoring original state..."
+        mv "${h264Dir}/${relativePath}/${sourceFile}" "$relativePath/"
+    fi
+
+    # Удаляем частично сконвертированный файл, если он существует
+    if [ -f "${h265Dir}/${relativePath}/${targetFile}" ]; then
+        rm "${h265Dir}/${relativePath}/${targetFile}"
+    fi
+
+    exit 1
+}
+
+# Функция для безопасного удаления пустого каталога h265
+cleanup_h265_dir() {
+    if [ -d "$h265Dir" ]; then
+        # Проверяем, пуста ли директория
+        if [ -z "$(find "$h265Dir" -type f)" ]; then
+            echo "Removing empty h265 directory..."
+            rmdir "$h265Dir"
+        else
+            echo "Warning: h265 directory is not empty, keeping it"
+            echo "Files remaining in h265 directory:"
+            find "$h265Dir" -type f
         fi
+    fi
+}
+
+shopt -s globstar
+
+for sourceFilePath in **/*.*; do
+    # Пропускаем файлы с неподходящими расширениями
+    if [[ $sourceFilePath != *.mp4 ]] && [[ $sourceFilePath != *.mov ]]; then
+         continue
+    fi
+
+    # Проверяем, не является ли файл уже сжатым H.265
+    if is_h265_encoded "$sourceFilePath"; then
+        echo "File \"${sourceFilePath}\" is already H.265 encoded, skipping"
+        continue
+    fi
+
+    echo "Convert \"${sourceFilePath}\""
+
+    relativePath=$(dirname "$sourceFilePath")
+    sourceFile=$(basename "$sourceFilePath")
+    targetFile="${sourceFile%.*}.${targetExtension}"
+
+    # Создаем целевые директории, если их нет
+    mkdir -p "${h265Dir}/${relativePath}"
+    mkdir -p "${h264Dir}/${relativePath}"
+
+    # Удаляем частично сконвертированный файл, если он существует
+    if [ -f "${h265Dir}/${relativePath}/${targetFile}" ]; then
+        rm "${h265Dir}/${relativePath}/${targetFile}"
+    fi
+
+    # Конвертируем видео в H.265, сохраняя все аудиодорожки и субтитры
+    if ! ffmpeg -i "$sourceFilePath" \
+           -map 0 \
+           -c:v libx265 -vtag hvc1 -preset fast \
+           -c:a copy \
+           -c:s copy \
+           -hide_banner \
+           "${h265Dir}/${relativePath}/${targetFile}"; then
+
+        handle_error "$sourceFile" "$relativePath" "$targetFile"
+    fi
+
+    # Перемещаем исходный файл во временную директорию перед конвертацией
+    mv "$sourceFilePath" "${h264Dir}/${relativePath}/${sourceFile}" || {
+        echo "Failed to move original file"
+        exit 1
+    }
+
+
+    # Перемещаем сконвертированный файл на место исходного
+    mv "${h265Dir}/${relativePath}/${targetFile}" "$relativePath/${sourceFile}" || {
+        echo "Failed to move converted file"
+        handle_error "$sourceFile" "$relativePath" "$targetFile"
+    }
+
+    echo "Successfully converted \"${sourceFilePath}\""
 done
+
+cleanup_h265_dir
+
+echo "All files processed successfully"
+exit 0
