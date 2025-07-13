@@ -1,0 +1,27 @@
+#!/bin/bash
+
+h264Dir=h264
+h265Dir=h265
+targetExtension=mp4
+
+mkdir -p h264
+mkdir -p h265
+
+for sourceFile in *.*
+do
+        if [[ $sourceFile == *.mp4 ]] || [[ $sourceFile == *.mov ]]; then
+                targetFile="${sourceFile%.*}.${targetExtension}"
+                echo "Convert \"${sourceFile}\" to \"${targetFile}\""
+
+                # Конвертируем видео в H.265, сохраняя все аудиодорожки и субтитры
+                ffmpeg -i "$sourceFile" \
+                  -map 0 \
+                  -c:v libx265 -vtag hvc1 -preset fast \
+                  -c:a copy \
+                  -c:s copy \
+                  -hide_banner \
+                  "$h265Dir/$targetFile"
+
+                mv "$sourceFile" "${h264Dir}/${sourceFile}"
+        fi
+done
