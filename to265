@@ -2,7 +2,7 @@
 
 h264Dir="h264"
 h265Dir="h265"
-targetExtension="mp4"
+targetExtension="mkv"
 
 # Функция для проверки, является ли видео поток H.265
 is_h265_encoded() {
@@ -58,13 +58,13 @@ shopt -s globstar
 shopt -s nullglob
 
 # Проверяем, есть ли файлы для обработки
-files=(**/*.{mp4,mov})
+files=(**/*.{mp4,mov,mkv})
 if [ ${#files[@]} -eq 0 ]; then
     echo "No .mp4 or .mov files found"
     exit 0
 fi
 
-for sourceFilePath in **/*.{mp4,mov}; do
+for sourceFilePath in **/*.{mp4,mov,mkv}; do
     # Пропускаем несуществующие файлы (на случай пустого glob)
     [ -f "$sourceFilePath" ] || continue
     
