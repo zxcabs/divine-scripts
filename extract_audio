@@ -1,0 +1,100 @@
+#!/bin/bash
+
+# ПРОВЕРКА ПАРАМЕТРОВ
+if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "Использование: $0 <путь_к_видео> <путь_для_аудио>"
+    echo "Пример: $0 /mnt/nas_video/Курсы/original_video ./02_extracted_audio"
+    exit 1
+fi
+
+# Включаем поддержку рекурсивного поиска через ** (globstar)
+shopt -s globstar
+# Включаем nullglob, чтобы скрипт не ругался, если какого-то формата (например, .mov) нет в папках
+shopt -s nullglob
+
+# Жесткая нормализация путей
+SRC_DIR=$(realpath -m "$1")
+DEST_DIR=$(realpath -m "$2")
+TEMP_DIR=$(realpath -m "./temp")
+
+# Массив для хранения сбойных файлов
+failed_files=()
+
+# Проверяем, существует ли исходная папка
+if [ ! -d "$SRC_DIR" ]; then
+    echo "Ошибка: Исходная директория $SRC_DIR не найдена!"
+    exit 1
+fi
+
+# Создаем временную директорию
+mkdir -p "$TEMP_DIR"
+
+echo "Старт извлечения аудиодорожек из: $SRC_DIR"
+echo "Сохранение аудиодорожек в: $DEST_DIR"
+echo "------------------------------------------"
+
+# ЗАЩИТА ОТ ПРОБЕЛОВ: сохраняем старый IFS и меняем его ТОЛЬКО на перенос строки
+OLD_IFS=$IFS
+IFS=$'\n'
+
+# Переходим в исходную папку, чтобы раскрытие маски (**/*) сработало корректно
+cd "$SRC_DIR" || exit 1
+
+# Безопасный цикл for по маске файлов
+for sourceFilePath in **/*.{mp4,mov,mkv}; do
+    
+    # Так как мы внутри SRC_DIR, sourceFilePath уже является чистым относительным путем!
+    # Формируем имя будущего аудиофайла с расширением .wav
+    audio_relative_path="${sourceFilePath%.*}.wav"
+    
+    # Финальный целевой путь (DEST_DIR абсолютный, так что всё соберется правильно)
+    output_file="$DEST_DIR/$audio_relative_path"
+    
+    # ПРОВЕРКА НА ПОВТОРНЫЙ ЗАПУСК
+    if [ -f "$output_file" ]; then
+        echo "Пропуск (уже обработан): $sourceFilePath"
+        continue
+    fi
+    
+    echo "Обработка: $sourceFilePath"
+    
+    # Уникальное имя временного файла (защита от коллизий)
+    temp_output_file="$TEMP_DIR/temp_convert_$$.wav"
+    
+    # Извлекаем аудио во временный файл (PCM 16-bit, 16кГц, моно-канал)
+    # Передаем полный абсолютный путь к видео через "$SRC_DIR/$sourceFilePath"
+    ffmpeg -y -i "$SRC_DIR/$sourceFilePath" -vn -acodec pcm_s16le -ar 16000 -ac 1 "$temp_output_file" -loglevel error
+    
+    # ОБРАБОТКА ОШИБОК: Проверяем код завершения FFmpeg
+    if [ $? -eq 0 ] && [ -s "$temp_output_file" ]; then
+        # Если извлечение успешно — создаем целевую папку и перемещаем файл
+        output_dir=$(dirname "$output_file")
+        mkdir -p "$output_dir"
+        mv "$temp_output_file" "$output_file"
+    else
+        echo "❌ Ошибка при обработке файла: $sourceFilePath"
+        failed_files+=("$sourceFilePath")
+        rm -f "$temp_output_file"
+    fi
+
+done
+
+# Возвращаем системный IFS в исходное состояние
+IFS=$OLD_IFS
+
+# Очищаем временную папку в конце работы
+rm -rf "$TEMP_DIR"
+
+# ВЫВОД ОТЧЕТА В КОНЦЕ РАБОТЫ
+echo -e "\n=========================================="
+echo "Процесс обработки завершен!"
+
+if [ ${#failed_files[@]} -ne 0 ]; then
+    echo -e "\n⚠️ Список поврежденных или сбойных файлов (${#failed_files[@]} шт.):"
+    for failed in "${failed_files[@]}"; do
+        echo "  - $failed"
+    done
+else
+    echo -e "\n🎉 Все файлы обработаны успешно, поломанных файлов нет!"
+fi
+echo "=========================================="
