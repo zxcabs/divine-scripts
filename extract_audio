@@ -30,11 +30,6 @@ fi
 # Создаем временную директорию
 mkdir -p "$TEMP_DIR"
 
-echo "Старт извлечения аудиодорожек из: $SRC_DIR"
-echo "Сохранение аудиодорожек в: $DEST_DIR"
-echo "Целевой язык аудио: $TARGET_LANG"
-echo "------------------------------------------"
-
 # ЗАЩИТА ОТ ПРОБЕЛОВ: сохраняем старый IFS и меняем его ТОЛЬКО на перенос строки
 OLD_IFS=$IFS
 IFS=$'\n'
@@ -42,10 +37,26 @@ IFS=$'\n'
 # Переходим в исходную папку, чтобы раскрытие маски (**/*) сработало корректно
 cd "$SRC_DIR" || exit 1
 
-# Безопасный цикл for по маске файлов
-for sourceFilePath in **/*.{mp4,mov,mkv}; do
+# Собираем все файлы в массив, чтобы узнать их общее количество
+files_to_process=( **/*.{mp4,mov,mkv} )
+total_files=${#files_to_process[@]}
+current_file_num=0
+
+echo "Старт извлечения аудиодорожек из: $SRC_DIR"
+echo "Сохранение аудиодорожек в: $DEST_DIR"
+echo "Целевой язык аудио: $TARGET_LANG"
+echo "Всего файлов для проверки: $total_files"
+echo "------------------------------------------"
+
+# Безопасный цикл по массиву файлов
+for sourceFilePath in "${files_to_process[@]}"; do
     
-    # Так как мы внутри SRC_DIR, sourceFilePath уже является чистым относительным путем!
+    # Инкрементируем счетчик текущего файла
+    ((current_file_num++))
+    # Считаем, сколько файлов осталось обработать (включая текущий или после него)
+    # total_files - current_file_num дает количество файлов, оставшихся ПОСЛЕ текущего
+    remaining_files=$((total_files - current_file_num))
+    
     # Формируем имя будущего аудиофайла с расширением .wav
     audio_relative_path="${sourceFilePath%.*}.wav"
     
@@ -54,16 +65,15 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
     
     # ПРОВЕРКА НА ПОВТОРНЫЙ ЗАПУСК
     if [ -f "$output_file" ]; then
-        echo "Пропуск (уже обработан): $sourceFilePath"
+        echo "[$current_file_num/$total_files] Пропуск (уже обработан, осталось: $remaining_files): $sourceFilePath"
         continue
     fi
     
-    echo "Обработка: $sourceFilePath"
+    echo "[$current_file_num/$total_files] Обработка (осталось: $remaining_files): $sourceFilePath"
     
     full_video_path="$SRC_DIR/$sourceFilePath"
     
     # 1. АНАЛИЗ ДОРОЖЕК С ПОМОЩЬЮ FFPROBE
-    # Получаем список вида "индекс:язык" для всех аудиодорожек
     track_info=$(ffprobe -v error -select_streams a -show_entries stream=index:stream_tags=language -of csv=p=0 "$full_video_path" 2>/dev/null)
     
     # Считаем количество аудиодорожек
@@ -74,21 +84,18 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
     fi
     
     # Переменная для хранения индекса выбранной дорожки в ffmpeg
-    # По умолчанию map_stream="0:a:0" (первая аудиодорожка), если файл с одной дорожкой
     map_stream="0:a:0"
     
     # 2. ПРОВЕРКА УСЛОВИЙ ЯЗЫКА
     if [ "$track_count" -eq 0 ]; then
-        echo "❌ Ошибка: В файле вообще нет аудиодорожек: $sourceFilePath"
+        echo "   ❌ Ошибка: В файле вообще нет аудиодорожек!"
         failed_files+=("$sourceFilePath (нет аудио)")
         continue
         
     elif [ "$track_count" -gt 1 ]; then
-        # Дорожек несколько. Ищем совпадение по языку
         found_index=""
         
         while read -r line; do
-            # Строка из ffprobe имеет вид "1,eng" или просто "1" (если тега языка нет)
             idx=$(echo "$line" | cut -d',' -f1)
             lang=$(echo "$line" | cut -d',' -f2 | tr '[:upper:]' '[:lower:]')
             
@@ -99,12 +106,10 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
         done <<< "$track_info"
         
         if [ -n "$found_index" ]; then
-            # Нашли нужный язык, маппим по абсолютному индексу стрима
             map_stream="0:$found_index"
             echo "   -> Найдено несколько дорожек. Выбрана дорожка с языком '$TARGET_LANG' (Stream индекс: $found_index)"
         else
-            # Ни одна дорожка не совпала по языку
-            echo "❌ Ошибка: Не найден язык '$TARGET_LANG' среди $track_count дорожек: $sourceFilePath"
+            echo "   ❌ Ошибка: Не найден язык '$TARGET_LANG' среди $track_count дорожек."
             failed_files+=("$sourceFilePath (язык не найден)")
             continue
         fi
@@ -115,17 +120,16 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
     # Уникальное имя временного файла (защита от коллизий)
     temp_output_file="$TEMP_DIR/temp_convert_$$.wav"
     
-    # Извлекаем выбранную аудиодорожку (-map "$map_stream") во временный файл
+    # Извлекаем выбранную аудиодорожку во временный файл
     ffmpeg -y -i "$full_video_path" -map "$map_stream" -vn -acodec pcm_s16le -ar 16000 -ac 1 "$temp_output_file" -loglevel error
     
     # ОБРАБОТКА ОШИБОК: Проверяем код завершения FFmpeg
     if [ $? -eq 0 ] && [ -s "$temp_output_file" ]; then
-        # Если извлечение успешно — создаем целевую папку и перемещаем файл
         output_dir=$(dirname "$output_file")
         mkdir -p "$output_dir"
         mv "$temp_output_file" "$output_file"
     else
-        echo "❌ Ошибка при конвертации файла: $sourceFilePath"
+        echo "   ❌ Ошибка при конвертации файла ffmpeg."
         failed_files+=("$sourceFilePath (ошибка ffmpeg)")
         rm -f "$temp_output_file"
     fi
