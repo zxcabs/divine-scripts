@@ -1,20 +1,21 @@
 #!/bin/bash
 
 # ПРОВЕРКА ПАРАМЕТРОВ
-if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Использование: $0 <путь_к_видео> <путь_для_аудио>"
-    echo "Пример: $0 /mnt/nas_video/Курсы/original_video ./02_extracted_audio"
+if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
+    echo "Использование: $0 <путь_к_видео> <путь_для_аудио> <язык>"
+    echo "Пример: $0 /mnt/nas_video/Курсы/original_video ./02_extracted_audio eng"
     exit 1
 fi
 
 # Включаем поддержку рекурсивного поиска через ** (globstar)
 shopt -s globstar
-# Включаем nullglob, чтобы скрипт не ругался, если какого-то формата (например, .mov) нет в папках
+# Включаем nullglob, чтобы скрипт не ругался, если какого-то формата нет в папках
 shopt -s nullglob
 
 # Жесткая нормализация путей
 SRC_DIR=$(realpath -m "$1")
 DEST_DIR=$(realpath -m "$2")
+TARGET_LANG=$(echo "$3" | tr '[:upper:]' '[:lower:]') # переводим язык в нижний регистр для надежности
 TEMP_DIR=$(realpath -m "./temp")
 
 # Массив для хранения сбойных файлов
@@ -31,6 +32,7 @@ mkdir -p "$TEMP_DIR"
 
 echo "Старт извлечения аудиодорожек из: $SRC_DIR"
 echo "Сохранение аудиодорожек в: $DEST_DIR"
+echo "Целевой язык аудио: $TARGET_LANG"
 echo "------------------------------------------"
 
 # ЗАЩИТА ОТ ПРОБЕЛОВ: сохраняем старый IFS и меняем его ТОЛЬКО на перенос строки
@@ -58,12 +60,63 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
     
     echo "Обработка: $sourceFilePath"
     
+    full_video_path="$SRC_DIR/$sourceFilePath"
+    
+    # 1. АНАЛИЗ ДОРОЖЕК С ПОМОЩЬЮ FFPROBE
+    # Получаем список вида "индекс:язык" для всех аудиодорожек
+    track_info=$(ffprobe -v error -select_streams a -show_entries stream=index:stream_tags=language -of csv=p=0 "$full_video_path" 2>/dev/null)
+    
+    # Считаем количество аудиодорожек
+    if [ -z "$track_info" ]; then
+        track_count=0
+    else
+        track_count=$(echo "$track_info" | wc -l)
+    fi
+    
+    # Переменная для хранения индекса выбранной дорожки в ffmpeg
+    # По умолчанию map_stream="0:a:0" (первая аудиодорожка), если файл с одной дорожкой
+    map_stream="0:a:0"
+    
+    # 2. ПРОВЕРКА УСЛОВИЙ ЯЗЫКА
+    if [ "$track_count" -eq 0 ]; then
+        echo "❌ Ошибка: В файле вообще нет аудиодорожек: $sourceFilePath"
+        failed_files+=("$sourceFilePath (нет аудио)")
+        continue
+        
+    elif [ "$track_count" -gt 1 ]; then
+        # Дорожек несколько. Ищем совпадение по языку
+        found_index=""
+        
+        while read -r line; do
+            # Строка из ffprobe имеет вид "1,eng" или просто "1" (если тега языка нет)
+            idx=$(echo "$line" | cut -d',' -f1)
+            lang=$(echo "$line" | cut -d',' -f2 | tr '[:upper:]' '[:lower:]')
+            
+            if [ "$lang" = "$TARGET_LANG" ]; then
+                found_index=$idx
+                break
+            fi
+        done <<< "$track_info"
+        
+        if [ -n "$found_index" ]; then
+            # Нашли нужный язык, маппим по абсолютному индексу стрима
+            map_stream="0:$found_index"
+            echo "   -> Найдено несколько дорожек. Выбрана дорожка с языком '$TARGET_LANG' (Stream индекс: $found_index)"
+        else
+            # Ни одна дорожка не совпала по языку
+            echo "❌ Ошибка: Не найден язык '$TARGET_LANG' среди $track_count дорожек: $sourceFilePath"
+            failed_files+=("$sourceFilePath (язык не найден)")
+            continue
+        fi
+    else
+        echo "   -> Найдена только 1 аудиодорожка. Извлекаем её по умолчанию."
+    fi
+    
     # Уникальное имя временного файла (защита от коллизий)
     temp_output_file="$TEMP_DIR/temp_convert_$$.wav"
     
-    # Извлекаем аудио во временный файл (PCM 16-bit, 16кГц, моно-канал)
-    # Передаем полный абсолютный путь к видео через "$SRC_DIR/$sourceFilePath"
-    ffmpeg -y -i "$SRC_DIR/$sourceFilePath" -vn -acodec pcm_s16le -ar 16000 -ac 1 "$temp_output_file" -loglevel error
+    # Извлекаем выбранную аудиодорожку (-map "$map_stream") во временный файл
+    ffmpeg -y -i "$full_video_path" -map "$map_stream" -vn -acodec pcm_s16le -ar 16000 -ac 1 "$temp_output_file" -loglevel error
     
     # ОБРАБОТКА ОШИБОК: Проверяем код завершения FFmpeg
     if [ $? -eq 0 ] && [ -s "$temp_output_file" ]; then
@@ -72,8 +125,8 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
         mkdir -p "$output_dir"
         mv "$temp_output_file" "$output_file"
     else
-        echo "❌ Ошибка при обработке файла: $sourceFilePath"
-        failed_files+=("$sourceFilePath")
+        echo "❌ Ошибка при конвертации файла: $sourceFilePath"
+        failed_files+=("$sourceFilePath (ошибка ffmpeg)")
         rm -f "$temp_output_file"
     fi
 
@@ -90,11 +143,11 @@ echo -e "\n=========================================="
 echo "Процесс обработки завершен!"
 
 if [ ${#failed_files[@]} -ne 0 ]; then
-    echo -e "\n⚠️ Список поврежденных или сбойных файлов (${#failed_files[@]} шт.):"
+    echo -e "\n⚠️ Список поврежденных, неподходящих или сбойных файлов (${#failed_files[@]} шт.):"
     for failed in "${failed_files[@]}"; do
         echo "  - $failed"
     done
 else
-    echo -e "\n🎉 Все файлы обработаны успешно, поломанных файлов нет!"
+    echo -e "\n🎉 Все файлы обработаны успешно, поломанных или неподходящих файлов нет!"
 fi
 echo "=========================================="
