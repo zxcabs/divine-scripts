@@ -4,6 +4,9 @@ h264Dir="h264"
 h265Dir="h265"
 targetExtension="mkv"
 
+# Массив для хранения путей к поврежденным файлам
+corrupted_files=()
+
 # Функция для проверки, является ли видео поток H.265
 is_h265_encoded() {
     local file="$1"
@@ -11,13 +14,17 @@ is_h265_encoded() {
     return $?
 }
 
-# Функция для обработки ошибок
+# Функция для обработки ошибок (теперь не прерывает скрипт)
 handle_error() {
     local sourceFile="$1"
     local relativePath="$2"
     local targetFile="$3"
+    local fullSourcePath="$4"
 
-    echo "Error processing file: ${sourceFile}" >&2
+    echo "Error processing file: ${fullSourcePath}" >&2
+    
+    # Сохраняем путь к поврежденному файлу в отчет
+    corrupted_files+=("${fullSourcePath}")
 
     # Если существует оригинальный файл в h264Dir, возвращаем его на место
     if [ -f "${h264Dir}/${relativePath}/${sourceFile}" ]; then
@@ -29,8 +36,6 @@ handle_error() {
     if [ -f "${h265Dir}/${relativePath}/${targetFile}" ]; then
         rm "${h265Dir}/${relativePath}/${targetFile}" 2>/dev/null || true
     fi
-
-    exit 1
 }
 
 # Функция для безопасного удаления пустого каталога h265
@@ -60,7 +65,7 @@ shopt -s nullglob
 # Проверяем, есть ли файлы для обработки
 files=(**/*.{mp4,mov,mkv})
 if [ ${#files[@]} -eq 0 ]; then
-    echo "No .mp4 or .mov files found"
+    echo "No .mp4, .mov or .mkv files found"
     exit 0
 fi
 
@@ -97,32 +102,33 @@ for sourceFilePath in **/*.{mp4,mov,mkv}; do
     # Конвертируем видео в H.265, сохраняя все аудиодорожки и субтитры
     if ! ffmpeg -i "$sourceFilePath" \
            -map 0 \
-           -c:v hevc_nvenc -rc constqp -cq 25 -preset fast -vtag hvc1 \
+           -c:v hevc_nvenc -rc constqp -cq 22 -preset fast -spatial_aq 1 -temporal_aq 1 -vtag hvc1 \
            -c:a copy \
            -c:s copy \
            -hide_banner \
            -y \
            "${h265Dir}/${relativePath}/${targetFile}"; then
 
-        handle_error "$sourceFile" "$relativePath" "$targetFile"
+        # Передаем полный путь к исходному файлу для добавления в массив ошибок
+        handle_error "$sourceFile" "$relativePath" "$targetFile" "$sourceFilePath"
+        continue # Переходим к следующему файлу вместо остановки
     fi
 
-    # Перемещаем исходный файл во временную директорию перед конвертацией
+    # Перемещаем исходный файл во временную директорию
     if ! mv "$sourceFilePath" "${h264Dir}/${relativePath}/${sourceFile}"; then
         echo "Failed to move original file" >&2
-        # Очищаем созданный файл
         rm -f "${h265Dir}/${relativePath}/${targetFile}"
-        exit 1
+        corrupted_files+=("${sourceFilePath}")
+        continue
     fi
 
     # Перемещаем сконвертированный файл на место исходного
-    if ! mv "${h265Dir}/${relativePath}/${targetFile}" "${relativePath}/${sourceFile}"; then
+    if ! mv "${h265Dir}/${relativePath}/${targetFile}" "${relativePath}/${targetFile}"; then
         echo "Failed to move converted file" >&2
-        # Восстанавливаем оригинальный файл
         mv "${h264Dir}/${relativePath}/${sourceFile}" "$sourceFilePath" 2>/dev/null || true
-        # Удаляем сконвертированный файл
         rm -f "${h265Dir}/${relativePath}/${targetFile}"
-        handle_error "$sourceFile" "$relativePath" "$targetFile"
+        handle_error "$sourceFile" "$relativePath" "$targetFile" "$sourceFilePath"
+        continue
     fi
 
     echo "Successfully converted \"${sourceFilePath}\""
@@ -130,5 +136,19 @@ done
 
 cleanup_h265_dir
 
-echo "All files processed successfully"
-exit 0
+# --- ФИНАЛЬНЫЙ ОТЧЕТ ---
+echo -e "\n=========================================="
+if [ ${#corrupted_files[@]} -ne 0 ]; then
+    echo "Processing finished with errors."
+    echo "The following files are corrupted or could not be processed:"
+    echo "------------------------------------------"
+    for failed_file in "${corrupted_files[@]}"; do
+        echo "❌ $failed_file"
+    done
+    echo "=========================================="
+    exit 2 # Выходим со специальным кодом, сигнализирующим о битых файлах
+else
+    echo "All files processed successfully! 🎉"
+    echo "=========================================="
+    exit 0
+fi
